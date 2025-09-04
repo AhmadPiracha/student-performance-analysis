@@ -1,0 +1,104 @@
+# ==== Executive Function (EF) Analysis Pipeline Config ====
+
+project:
+  name: "EF Integrated Analysis"
+  random_seed: 42
+
+paths:
+  data_raw: "data/raw"
+  data_processed: "data/processed"
+  outputs_datasets: "outputs/datasets"
+  outputs_figures: "outputs/figures"
+  outputs_reports: "outputs/reports"
+
+files:
+  excel_file: "dataset.xlsx"
+  sheets:
+    windows: "Windows"
+    body: "Body"
+    emotion: "Emtion"
+    gamesdata: "GamesData"
+    m1: "M1"
+    m2: "M2"
+    m3: "M3"
+    m4: "M4"
+    m5: "M5"
+
+schema:
+  id: "user_id"
+  timestamp: "timestamp"
+  accuracy: "accuracy"
+  reaction_time: "reaction_time"
+  correct_flag: "is_correct"
+  task: "task"
+
+  task_specific:
+    M1:
+      reaction_time: "ReactionTime_ms2"
+      correct_flag: "Outcome"
+    M2:
+      reaction_time: "ReactionTime_ms"
+      correct_flag: "Outcome"
+    M3:
+      reaction_time: "QAnswerRT_ms"
+      correct_flag: "IsCorrect"
+    M4:
+      reaction_time: "reaction_time_ms2"
+      correct_flag: "is_correct"
+    M5:
+      reaction_time: "ReactionTime_ms"
+      correct_flag: "IsCorrect"
+
+  # Emotion sheet
+  emotion_cols:
+    - "emotion"
+    - "confidence"
+    - "x"
+    - "y"
+    - "w"
+    - "h"
+
+  # Body sheet
+  body_cols:
+    - "head_angle_2d"
+    - "shoulder_diff"
+    - "head_dir_x"
+    - "head_dir_y"
+    - "head_dir_z"
+    - "pupil_dev_x"
+    - "pupil_dev_y"
+    - "gaze_vec_x"
+    - "gaze_vec_y"
+    - "gaze_vec_z"
+
+  # EF task-domain mapping
+  task_domains:
+    working_memory:
+      - "M2"
+      - "M3"
+    inhibitory_control:
+      - "M1"
+      - "M5"
+    cognitive_flexibility:
+      - "M4"
+
+
+preprocessing:
+  duplicates: "drop"
+  missing_strategy:
+    performance: "drop_row"
+    emotion: "impute_median"
+    body: "impute_median"
+  normalize_ids: true
+
+merging:
+  join_on_time: true
+  time_tolerance_seconds: 5
+
+visuals:
+  per_student_limit: 50
+
+report:
+  title: "Executive Function (EF) Integrated Analysis Report"
+  author: "Auto-generated"
+  include_student_summaries: true

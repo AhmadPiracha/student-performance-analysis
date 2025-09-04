@@ -1,0 +1,92 @@
+
+import os, yaml, pandas as pd
+import matplotlib.pyplot as plt
+
+def plot_per_student_kpis(df, id_col, out_dir, limit=50):
+    os.makedirs(out_dir, exist_ok=True)
+    students = df[id_col].dropna().unique().tolist()[:limit]
+    for sid in students:
+        sub = df[df[id_col] == sid]
+        # Bar plots per KPI by task
+        for metric in ["avg_accuracy", "avg_reaction_time", "error_rate"]:
+            plt.figure()
+            pivot = sub.pivot_table(index="task", values=metric, aggfunc="mean")
+            pivot.plot(kind="bar", legend=False)
+            plt.title(f"{sid} — {metric}")
+            plt.xlabel("Task")
+            plt.ylabel(metric)
+            plt.tight_layout()
+            path = os.path.join(out_dir, f"{sid}_{metric}.png")
+            plt.savefig(path)
+            plt.close()
+
+def heatmap(df, index_col, columns_col, value_col, out_path):
+    # Simple heatmap using imshow (no specific colors)
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    pv = df.pivot_table(index=index_col, columns=columns_col, values=value_col, aggfunc="mean")
+    data = pv.values
+    plt.figure()
+    plt.imshow(data, aspect="auto")
+    plt.xticks(range(len(pv.columns)), pv.columns, rotation=45, ha="right")
+    plt.yticks(range(len(pv.index)), pv.index)
+    plt.title(f"Heatmap: {value_col}")
+    plt.colorbar()
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+def run(config_path):
+    import yaml
+    with open(config_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    proc = cfg["paths"]["data_processed"]
+    figs = cfg["paths"]["outputs_figures"]
+    os.makedirs(figs, exist_ok=True)
+
+    perf_kpis = os.path.join(proc, "performance_kpis.csv")
+    emo_perf = os.path.join(proc, "emotion_perf_compare.csv")
+    body_perf = os.path.join(proc, "body_perf_compare.csv")
+
+    id_col = cfg["schema"]["id"]
+
+    if os.path.exists(perf_kpis):
+        df = pd.read_csv(perf_kpis)
+        plot_per_student_kpis(df, id_col, os.path.join(figs, "per_student_kpis"), limit=cfg["visuals"]["per_student_limit"])
+
+        # Heatmap examples
+        heatmap(df, index_col=id_col, columns_col="task", value_col="avg_accuracy",
+                out_path=os.path.join(figs, "heatmap_accuracy.png"))
+        heatmap(df, index_col=id_col, columns_col="task", value_col="avg_reaction_time",
+                out_path=os.path.join(figs, "heatmap_rt.png"))
+        heatmap(df, index_col=id_col, columns_col="task", value_col="error_rate",
+                out_path=os.path.join(figs, "heatmap_error.png"))
+
+    # If emotion/body comparisons exist, export simple correlation heatmaps
+    for path, tag in [(emo_perf, "emotion"), (body_perf, "body")]:
+        if os.path.exists(path):
+            comp = pd.read_csv(path)
+            # numeric correlation heatmap
+            corr = comp.select_dtypes(include="number").corr()
+            if corr.size > 0:
+                import numpy as np
+                plt.figure()
+                plt.imshow(corr.values, aspect="auto")
+                plt.xticks(range(len(corr.columns)), corr.columns, rotation=45, ha="right")
+                plt.yticks(range(len(corr.index)), corr.index)
+                plt.title(f"Heatmap: correlation ({tag} vs performance)")
+                plt.colorbar()
+                plt.tight_layout()
+                plt.savefig(os.path.join(figs, f"heatmap_corr_{tag}.png"))
+                plt.close()
+
+    return {"figures_dir": figs}
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    args = parser.parse_args()
+    print(run(args.config))
