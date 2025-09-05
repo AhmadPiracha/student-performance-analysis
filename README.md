@@ -112,6 +112,3 @@ python -m scripts.run_all --config config.yaml
 * Visualizations use **matplotlib** only (no seaborn) and avoid specifying colors.
 * Accuracy in percent is automatically normalized to 0–1.
 * Timestamp-based merges use a tolerance window (`time_tolerance_seconds` in config).
-
-
-I can also **create a concise “Client Delivery Instructions” section** that explains *exactly which files to send to the client*, so they can open it directly and understand the results. Do you want me to add that too?
