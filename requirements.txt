@@ -7,3 +7,5 @@ scipy
 pyyaml
 plotly
 jupyter
+openpyxl
+tabulate
