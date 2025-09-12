@@ -1,4 +1,6 @@
-import argparse, yaml
+import argparse
+import yaml
+import warnings
 from scripts.preprocess import run as run_pre
 from scripts.performance import run as run_perf
 from scripts.emotion import run as run_emo
@@ -8,29 +10,88 @@ from scripts.visualize import run as run_visualize
 from scripts.build_datasets import run as run_build
 from scripts.report import run as run_report
 
+warnings.filterwarnings("ignore")  # suppress pandas / matplotlib warnings
 
-def main(config):
-    print("1) Preprocessing...")
-    print(run_pre(config))
-    print("2) Performance analysis...")
-    print(run_perf(config))
-    print("3) Emotion analysis...")
-    print(run_emo(config))
-    print("4) Body motion analysis...")
-    print(run_body(config))
-    print("5) Integrated analysis...")
-    print(run_integrate(config))
-    print("6) Visualizations...")
-    print(run_visualize(config))
-    print("7) Build delivery datasets...")
-    print(run_build(config))
-    print("8) Generate report...")
-    print(run_report(config))
-    print("Done.")
+
+def main(config_path):
+    print(f"Loading config: {config_path}")
+    with open(config_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    outputs = {}
+
+    try:
+        print("1) Preprocessing...")
+        outputs['preprocess'] = run_pre(config_path)
+        print("Done. Outputs:", outputs['preprocess'])
+    except Exception as e:
+        print("Preprocessing failed:", e)
+        return
+
+    try:
+        print("2) Performance analysis...")
+        outputs['performance'] = run_perf(config_path)
+        print("Done. Outputs:", outputs['performance'])
+    except Exception as e:
+        print("Performance analysis failed:", e)
+        return
+
+    try:
+        print("3) Emotion analysis...")
+        outputs['emotion'] = run_emo(config_path)
+        print("Done. Outputs:", outputs['emotion'])
+    except Exception as e:
+        print("Emotion analysis failed:", e)
+        return
+
+    try:
+        print("4) Body motion analysis...")
+        outputs['body'] = run_body(config_path)
+        print("Done. Outputs:", outputs['body'])
+    except Exception as e:
+        print("Body motion analysis failed:", e)
+        return
+
+    try:
+        print("5) Integrated analysis...")
+        outputs['integrated'] = run_integrate(config_path)
+        print("Done. Outputs:", outputs['integrated'])
+    except Exception as e:
+        print("Integrated analysis failed:", e)
+        return
+
+    try:
+        print("6) Visualizations...")
+        outputs['visualize'] = run_visualize(config_path)
+        print("Done. Outputs:", outputs['visualize'])
+    except Exception as e:
+        print("Visualizations failed:", e)
+        return
+
+    try:
+        print("7) Build delivery datasets...")
+        outputs['build_datasets'] = run_build(config_path)
+        print("Done. Outputs:", outputs['build_datasets'])
+    except Exception as e:
+        print("Build datasets failed:", e)
+        return
+
+    try:
+        print("8) Generate report...")
+        outputs['report'] = run_report(config_path)
+        print("Done. Outputs:", outputs['report'])
+    except Exception as e:
+        print("Report generation failed:", e)
+        return
+
+    print("Pipeline completed successfully!")
+    print("Summary of outputs per step:")
+    for step, out in outputs.items():
+        print(f"- {step}: {out}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config", required=True, help="Path to config.yaml")
     args = parser.parse_args()
     main(args.config)

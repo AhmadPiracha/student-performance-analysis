@@ -2,10 +2,73 @@ import os
 import yaml
 import numpy as np
 import pandas as pd
-from .utils import nearest_time_merge, compute_basic_kpis
+from pathlib import Path
+from scipy import stats
+from .utils import nearest_time_merge, compute_basic_kpis, paired_confidence_interval
 
+# === Helper: emotion features ===
+def compute_emotion_features(df, id_col, task_col, emo_cols, ts_col):
+    """Compute per-student-task emotion deltas + means."""
+    def per_group(g):
+        g = g.sort_values(ts_col)
+        out = {}
+        for c in emo_cols:
+            s = pd.to_numeric(g[c], errors="coerce")
+            out[f"{c}_delta"] = s.diff().mean() if len(s) > 1 else np.nan
+            out[f"{c}_mean"] = s.mean()
+        return pd.Series(out)
+
+    feats = df.groupby([id_col, task_col], dropna=False).apply(per_group).reset_index()
+    return feats
+
+# === Helper: paired effect size ===
+def cohens_d_paired(a, b):
+    diff = a - b
+    return diff.mean() / (diff.std(ddof=1) + 1e-9)
+
+def compare_with_baseline(base_df, with_emo_df, metrics):
+    """Compare baseline vs current using condition column."""
+    rows = []
+    for m in metrics:
+        a = base_df[m].dropna()
+        b = with_emo_df[m].dropna()
+
+        if len(a) == 0 or len(b) == 0 or len(a) != len(b):
+            continue
+
+        try:
+            tstat, tp = stats.ttest_rel(a, b, nan_policy="omit")
+        except Exception:
+            tp = np.nan
+        try:
+            wstat, wp = stats.wilcoxon(a, b)
+        except Exception:
+            wp = np.nan
+
+        d = cohens_d_paired(a, b)
+        ci_low, ci_high = paired_confidence_interval(b, a)   # note: b - a
+
+        rows.append({
+            "metric": m,
+            "mean_base": a.mean(),
+            "mean_with_emotion": b.mean(),
+            "delta": b.mean() - a.mean(),
+            "t_p": tp,
+            "wilcoxon_p": wp,
+            "cohens_d": d,
+            "ci_lower": ci_low,
+            "ci_upper": ci_high,
+            "n": len(a)
+        })
+    df = pd.DataFrame(rows)
+    cols_order = [
+        "metric", "mean_base", "mean_with_emotion", "delta",
+        "t_p", "wilcoxon_p", "cohens_d", "ci_lower", "ci_upper", "n"
+    ]
+    return df[cols_order]
+
+# === MAIN RUN ===
 def run(config_path):
-    # Load config
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
 
@@ -15,70 +78,86 @@ def run(config_path):
     task_col = schema["task"]
     acc_col = schema["accuracy"]
     rt_col = schema["reaction_time"]
-    emo_cols = schema["emotion_cols"]
+    emo_cols = schema.get("emotion_cols", [])
 
-    # Paths
-    perf_path = os.path.join(cfg["paths"]["data_processed"], "performance_clean.csv")
-    emo_path = os.path.join(cfg["paths"]["data_processed"], "emotion_clean.csv")
+    proc_dir = Path(cfg["paths"]["data_processed"])
+    perf_path = proc_dir / "performance_clean.csv"
+    emo_path = proc_dir / "emotion_clean.csv"
 
-    # Read CSVs safely
-    perf = pd.read_csv(perf_path)
-    emo = pd.read_csv(emo_path)
+    if not perf_path.exists() or not emo_path.exists():
+        return {}
 
-    # Convert timestamps
-    perf[ts_col] = pd.to_datetime(perf[ts_col], format="%d/%m/%Y %H:%M", errors="coerce", utc=True)
-    emo[ts_col] = pd.to_datetime(emo[ts_col], format="%d/%m/%Y %H:%M", errors="coerce", utc=True)
+    perf = pd.read_csv(perf_path, dtype=str, low_memory=False)
+    emo = pd.read_csv(emo_path, dtype=str, low_memory=False)
+
+    # --- Standardize IDs, tasks, timestamps ---
+    for df in [perf, emo]:
+        df[id_col] = df[id_col].astype(str)
+        if task_col in df.columns:
+            df[task_col] = df[task_col].astype(str)
+
+    perf[ts_col] = pd.to_datetime(perf[ts_col], errors="coerce", utc=True)
+    emo[ts_col] = pd.to_datetime(emo[ts_col], errors="coerce", utc=True)
+
+    # Drop rows with missing timestamps
+    perf = perf.dropna(subset=[ts_col])
+    emo = emo.dropna(subset=[ts_col])
+
+    # Ensure sorted
+    perf = perf.sort_values([id_col, ts_col])
+    emo = emo.sort_values([id_col, ts_col])
 
     if perf.empty or emo.empty:
-        # write empty outputs
-        out_dir = cfg["paths"]["data_processed"]
-        pd.DataFrame().to_csv(os.path.join(out_dir, "emotion_linked.csv"), index=False)
-        pd.DataFrame().to_csv(os.path.join(out_dir, "emotion_perf_compare.csv"), index=False)
-        return {
-            "emotion_linked": "data/processed/emotion_linked.csv",
-            "emotion_perf_compare": "data/processed/emotion_perf_compare.csv"
-        }
+        return {}
 
-    # Link emotion to performance by nearest timestamp per student
-    tol = cfg["merging"]["time_tolerance_seconds"]
-    linked = nearest_time_merge(perf, emo, on_id=id_col, left_time=ts_col, right_time=ts_col, tolerance_seconds=tol)
+    # Convert numeric emotion columns
+    for c in emo_cols:
+        if c in emo.columns:
+            emo[c] = pd.to_numeric(emo[c], errors="coerce").fillna(0)
 
-    # Compute simple emotion-change metrics per task
-    def per_student_task_changes(df):
-        df = df.sort_values(ts_col)
-        out = {}
-        for c in emo_cols:
-            s = df[c].astype(float)
-            out[f"{c}_delta"] = s.diff().mean() if len(s) > 1 else np.nan
-            out[f"{c}_mean"] = s.mean()
-        return pd.Series(out)
+    # Split baseline vs current
+    baseline = emo[emo["condition"] == "baseline"]
+    current = emo[emo["condition"] == "current"]
 
-    # Apply groupby safely
-    changes = linked.groupby([id_col, task_col], dropna=False, group_keys=False)\
-                    .apply(per_student_task_changes)\
-                    .reset_index(drop=True)
+    # Link performance + emotion
+    tol = cfg["merging"].get("time_tolerance_seconds", 5)
+    linked = nearest_time_merge(perf, emo, on_id=id_col,
+                                left_time=ts_col, right_time=ts_col,
+                                tolerance_seconds=tol)
 
-    # Compare performance with vs without emotion features
-    kpis = compute_basic_kpis(perf, id_col, task_col, acc_col, rt_col)
-    emo_means = linked.groupby([id_col, task_col], dropna=False)[emo_cols].mean().reset_index()
-    compare = kpis.merge(emo_means, on=[id_col, task_col], how="left")
+    # Features
+    emo_feats = compute_emotion_features(linked, id_col, task_col, emo_cols, ts_col)
 
-    # Quick correlation matrix
-    corr = compare.drop(columns=[id_col, task_col]).corr(numeric_only=True)
-    corr_path = os.path.join(cfg["paths"]["data_processed"], "emotion_perf_corr.csv")
-    corr.to_csv(corr_path, index=False)
+    # Baseline KPIs
+    base_kpis = compute_basic_kpis(perf, id_col, task_col, acc_col, rt_col)
+
+    # Merge features into KPIs
+    merged = base_kpis.merge(emo_feats, on=[id_col, task_col], how="left")
+
+    # Compare baseline vs current using condition
+    metrics = ["avg_accuracy", "avg_reaction_time", "error_rate"]
+    cmp = compare_with_baseline(
+        base_kpis.groupby(id_col).mean(numeric_only=True),
+        merged.groupby(id_col).mean(numeric_only=True),
+        metrics
+    )
+
+    # Correlation between KPIs and emotion
+    corr = merged.drop(columns=[id_col, task_col]).corr(numeric_only=True)
 
     # Save outputs
-    out_dir = cfg["paths"]["data_processed"]
-    linked.to_csv(os.path.join(out_dir, "emotion_linked.csv"), index=False)
-    changes.to_csv(os.path.join(out_dir, "emotion_changes_by_task.csv"), index=False)
-    compare.to_csv(os.path.join(out_dir, "emotion_perf_compare.csv"), index=False)
+    emo_feats.to_csv(proc_dir / "emotion_features_by_task.csv", index=False)
+    merged.to_csv(proc_dir / "emotion_perf_compare.csv", index=False)
+    cmp.to_csv(proc_dir / "comparison_emotion_vs_baseline.csv", index=False)
+    corr.to_csv(proc_dir / "emotion_perf_corr.csv", index=True)
+    linked.to_csv(proc_dir / "emotion_linked.csv", index=False)
 
     return {
-        "emotion_linked": "data/processed/emotion_linked.csv",
-        "emotion_changes_by_task": "data/processed/emotion_changes_by_task.csv",
-        "emotion_perf_compare": "data/processed/emotion_perf_compare.csv",
-        "emotion_perf_corr": "data/processed/emotion_perf_corr.csv"
+        "features": str(proc_dir / "emotion_features_by_task.csv"),
+        "linked": str(proc_dir / "emotion_linked.csv"),
+        "compare": str(proc_dir / "emotion_perf_compare.csv"),
+        "baseline_vs_emotion": str(proc_dir / "comparison_emotion_vs_baseline.csv"),
+        "corr": str(proc_dir / "emotion_perf_corr.csv"),
     }
 
 if __name__ == "__main__":

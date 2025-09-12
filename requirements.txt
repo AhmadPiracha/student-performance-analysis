@@ -1,11 +1,24 @@
+# Core data stack
 pandas
 numpy
-matplotlib
-seaborn
-scikit-learn
 scipy
+scikit-learn
 pyyaml
-plotly
-jupyter
 openpyxl
 tabulate
+
+# Visualization
+matplotlib
+seaborn
+plotly
+
+# Reporting / Jupyter
+jupyter
+
+# Report generation
+pypandoc
+weasyprint   # for PDF export (no LaTeX needed)
+
+
+pyppeteer 
+markdown

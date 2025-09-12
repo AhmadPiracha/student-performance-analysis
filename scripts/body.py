@@ -1,7 +1,68 @@
+import os
+import yaml
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from scipy import stats
+from .utils import nearest_time_merge, compute_basic_kpis, paired_confidence_interval
 
-import os, yaml, numpy as np, pandas as pd
-from .utils import nearest_time_merge
+# === Helper: body features ===
+def compute_body_features(df, id_col, task_col, body_cols):
+    """Compute per-student-task body feature means and stds."""
+    def per_group(g):
+        out = {}
+        for c in body_cols:
+            s = pd.to_numeric(g[c], errors="coerce")
+            out[f"{c}_mean"] = s.mean()
+            out[f"{c}_std"] = s.std()
+        return pd.Series(out)
 
+    feats = df.groupby([id_col, task_col], dropna=False).apply(per_group).reset_index()
+    return feats
+
+# === Helper: paired effect size ===
+def cohens_d_paired(a, b):
+    diff = a - b
+    return diff.mean() / (diff.std(ddof=1) + 1e-9)
+
+def compare_with_baseline(base_df, with_body_df, metrics):
+    rows = []
+    for m in metrics:
+        a = base_df[m].dropna()
+        b = with_body_df[m].dropna()
+
+        if len(a) == 0 or len(b) == 0 or len(a) != len(b):
+            continue
+
+        try:
+            tstat, tp = stats.ttest_rel(a, b, nan_policy="omit")
+        except Exception:
+            tp = np.nan
+        try:
+            wstat, wp = stats.wilcoxon(a, b)
+        except Exception:
+            wp = np.nan
+        d = cohens_d_paired(a, b)
+        ci_low, ci_high = paired_confidence_interval(b, a)
+
+        rows.append({
+            "metric": m,
+            "n": len(a),
+            "t_p": float(tp) if not np.isnan(tp) else None,
+            "wilcoxon_p": float(wp) if not np.isnan(wp) else None,
+            "cohens_d": float(d) if not np.isnan(d) else None,
+            "ci_lower": float(ci_low) if not np.isnan(ci_low) else None,
+            "ci_upper": float(ci_high) if not np.isnan(ci_high) else None,
+        })
+
+    df = pd.DataFrame(rows)
+    cols_order = [
+        "metric", "n", "t_p", "wilcoxon_p", "cohens_d", "ci_lower", "ci_upper"
+    ]
+
+    return df[cols_order]
+
+# === MAIN RUN ===
 def run(config_path):
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
@@ -12,46 +73,75 @@ def run(config_path):
     task_col = schema["task"]
     acc_col = schema["accuracy"]
     rt_col = schema["reaction_time"]
-    body_cols = schema["body_cols"]
+    body_cols = schema.get("body_cols", [])
 
-    perf_path = os.path.join(cfg["paths"]["data_processed"], "performance_clean.csv")
-    body_path = os.path.join(cfg["paths"]["data_processed"], "body_clean.csv")
-    perf = pd.read_csv(perf_path, parse_dates=[ts_col]) if os.path.exists(perf_path) else pd.DataFrame()
-    body = pd.read_csv(body_path, parse_dates=[ts_col]) if os.path.exists(body_path) else pd.DataFrame()
+    proc_dir = Path(cfg["paths"]["data_processed"])
+    perf_path = proc_dir / "performance_clean.csv"
+    body_path = proc_dir / "body_clean.csv"
+
+    if not perf_path.exists() or not body_path.exists():
+        return {}
+
+    perf = pd.read_csv(perf_path, dtype=str, low_memory=False)
+    body = pd.read_csv(body_path, dtype=str, low_memory=False)
+
+    # Convert timestamps
+    perf[ts_col] = pd.to_datetime(perf[ts_col], errors="coerce", utc=True)
+    body[ts_col] = pd.to_datetime(body[ts_col], errors="coerce", utc=True)
 
     if perf.empty or body.empty:
-        out_dir = cfg["paths"]["data_processed"]
-        pd.DataFrame().to_csv(os.path.join(out_dir, "body_linked.csv"), index=False)
-        pd.DataFrame().to_csv(os.path.join(out_dir, "body_perf_compare.csv"), index=False)
-        return {"body_linked": "data/processed/body_linked.csv",
-                "body_perf_compare": "data/processed/body_perf_compare.csv"}
+        return {}
 
-    tol = cfg["merging"]["time_tolerance_seconds"]
-    linked = nearest_time_merge(perf, body, on_id=id_col, left_time=ts_col, right_time=ts_col, tolerance_seconds=tol)
+    # Convert numeric body columns
+    for c in body_cols:
+        if c in body.columns:
+            body[c] = pd.to_numeric(body[c], errors="coerce").fillna(0)
 
-    # Aggregate body metrics per student-task
-    agg = linked.groupby([id_col, task_col], dropna=False)[body_cols].agg(["mean", "std"]).reset_index()
-    # Flatten columns
-    agg.columns = ['_'.join([c for c in col if c]) if isinstance(col, tuple) else col for col in agg.columns]
+    # Split baseline vs current
+    baseline = body[body["condition"] == "baseline"]
+    current = body[body["condition"] == "current"]
 
-    # Compare performance with vs without body features (simple correlations)
-    from .utils import compute_basic_kpis
-    kpis = compute_basic_kpis(perf, id_col, task_col, acc_col, rt_col)
-    body_means = linked.groupby([id_col, task_col], dropna=False)[body_cols].mean().reset_index()
-    compare = kpis.merge(body_means, on=[id_col, task_col], how="left")
-    corr = compare.drop(columns=[id_col, task_col]).corr(numeric_only=True)
-    corr_path = os.path.join(cfg["paths"]["data_processed"], "body_perf_corr.csv")
-    corr.to_csv(corr_path)
+    # Link performance + body
+    tol = cfg["merging"].get("time_tolerance_seconds", 5)
+    linked = nearest_time_merge(perf, body, on_id=id_col,
+                                left_time=ts_col, right_time=ts_col,
+                                tolerance_seconds=tol)
 
-    out_dir = cfg["paths"]["data_processed"]
-    linked.to_csv(os.path.join(out_dir, "body_linked.csv"), index=False)
-    agg.to_csv(os.path.join(out_dir, "body_summary_by_task.csv"), index=False)
-    compare.to_csv(os.path.join(out_dir, "body_perf_compare.csv"), index=False)
+    # Features
+    body_feats = compute_body_features(linked, id_col, task_col, body_cols)
 
-    return {"body_linked": "data/processed/body_linked.csv",
-            "body_summary_by_task": "data/processed/body_summary_by_task.csv",
-            "body_perf_compare": "data/processed/body_perf_compare.csv",
-            "body_perf_corr": "data/processed/body_perf_corr.csv"}
+    # Baseline KPIs
+    base_kpis = compute_basic_kpis(perf, id_col, task_col, acc_col, rt_col)
+
+    # Merge features into KPIs
+    merged = base_kpis.merge(body_feats, on=[id_col, task_col], how="left")
+
+    # Compare baseline vs current using condition
+    metrics = ["avg_accuracy", "avg_reaction_time", "error_rate"]
+    cmp = compare_with_baseline(
+        base_kpis.groupby(id_col).mean(numeric_only=True),
+        merged.groupby(id_col).mean(numeric_only=True),
+        metrics
+    )
+
+    # Correlation between KPIs and body features
+    corr = merged.drop(columns=[id_col, task_col]).corr(numeric_only=True)
+
+    # Save outputs
+    body_feats.to_csv(proc_dir / "body_features_by_task.csv", index=False)
+    merged.to_csv(proc_dir / "body_perf_compare.csv", index=False)
+    cmp.to_csv(proc_dir / "comparison_body_vs_baseline.csv", index=False)
+    corr.to_csv(proc_dir / "body_perf_corr.csv", index=True)
+    linked.to_csv(proc_dir / "body_linked.csv", index=False)
+
+    return {
+        "features": str(proc_dir / "body_features_by_task.csv"),
+        "linked": str(proc_dir / "body_linked.csv"),
+        "compare": str(proc_dir / "body_perf_compare.csv"),
+        "baseline_vs_body": str(proc_dir / "comparison_body_vs_baseline.csv"),
+        "corr": str(proc_dir / "body_perf_corr.csv"),
+    }
+
 
 if __name__ == "__main__":
     import argparse
