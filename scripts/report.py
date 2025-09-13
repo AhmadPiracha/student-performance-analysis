@@ -64,8 +64,46 @@ def write_report(cfg):
     dict_xlsx   = os.path.join(proc, "data_dictionary.xlsx")
     fig_dir     = cfg["paths"]["outputs_figures"]
 
-    def exists_read(p):
-        return os.path.exists(p) and os.path.getsize(p) > 0
+    # collect dropped columns info
+    dropped_columns = {}
+
+    def load_df(path):
+        """Try reading a CSV first, then an XLSX with the same path stem.
+
+        Returns a DataFrame or None if no readable file exists.
+        After reading, drop columns that are all-NaN and replace remaining NaNs with empty string
+        to make markdown output concise.
+        """
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            try:
+                df = pd.read_csv(path)
+            except Exception:
+                try:
+                    df = pd.read_excel(path)
+                except Exception:
+                    return None
+        else:
+            # try xlsx variant
+            xlsx = os.path.splitext(path)[0] + ".xlsx"
+            if os.path.exists(xlsx) and os.path.getsize(xlsx) > 0:
+                try:
+                    df = pd.read_excel(xlsx)
+                except Exception:
+                    return None
+            else:
+                return None
+
+        # Drop columns that are entirely NA to reduce noise, then fill remaining NaNs
+        try:
+            all_cols = list(df.columns)
+            df = df.dropna(axis=1, how='all')
+            dropped = [c for c in all_cols if c not in df.columns]
+            if dropped:
+                dropped_columns[path] = dropped
+            df = df.fillna("")
+        except Exception:
+            pass
+        return df
 
     lines = []
     lines.append(f"# {cfg['report']['title']}")
@@ -73,81 +111,91 @@ def write_report(cfg):
     lines.append(f"**Generated**: {datetime.utcnow().isoformat()}Z")
 
     # === Core Performance KPIs ===
-    if exists_read(perf_path):
-        perf = pd.read_csv(perf_path)
+    perf = load_df(perf_path)
+    if perf is not None:
         lines.append(section("Core Performance KPIs"))
         lines.append(perf.head(20).to_markdown(index=False))
 
-    if exists_read(dom_path):
-        dom = pd.read_csv(dom_path)
+    dom = load_df(dom_path)
+    if dom is not None:
         lines.append(section("Executive Function Domains (WM / IC / CF)"))
         lines.append(dom.head(20).to_markdown(index=False))
 
     # === Emotion Analysis ===
-    if exists_read(emo_comp):
-        emo = pd.read_csv(emo_comp)
+    emo = load_df(emo_comp)
+    if emo is not None:
         lines.append(section("Emotion vs Baseline Performance"))
         lines.append(emo.to_markdown(index=False))
 
-    if exists_read(emo_corr):
-        corr = pd.read_csv(emo_corr)
+    corr = load_df(emo_corr)
+    if corr is not None:
         lines.append(section("Emotion–Performance Correlations"))
         lines.append(corr.to_markdown(index=False))
 
     # === Body Motion Analysis ===
-    if exists_read(body_comp):
-        body = pd.read_csv(body_comp)
+    body = load_df(body_comp)
+    if body is not None:
         lines.append(section("Body Motion vs Baseline Performance"))
         lines.append(body.to_markdown(index=False))
 
-    if exists_read(body_corr):
-        corr = pd.read_csv(body_corr)
+    corr = load_df(body_corr)
+    if corr is not None:
         lines.append(section("Body–Performance Correlations"))
         lines.append(corr.to_markdown(index=False))
 
     # === Integrated Profiles ===
-    if exists_read(ef_prof):
-        ef = pd.read_csv(ef_prof)
+    ef = load_df(ef_prof)
+    if ef is not None:
         lines.append(section("Executive Function Profiles (Per Student)"))
         lines.append(ef.to_markdown(index=False))
 
-    if exists_read(integ):
-        integ_df = pd.read_csv(integ)
+    integ_df = load_df(integ)
+    if integ_df is not None:
         if "needs_review" in integ_df.columns:
             flagged = integ_df[integ_df["needs_review"] == True]
             lines.append(section("Early Indicators (Needs Review)"))
             lines.append(flagged.to_markdown(index=False) if len(flagged) > 0 else "  No students flagged in current data.")
 
-    if exists_read(indicators):
-        ind = pd.read_csv(indicators)
+    ind = load_df(indicators)
+    if ind is not None:
         lines.append(section("Early Indicators Report (Quantitative)"))
         lines.append(ind.to_markdown(index=False))
 
     # === Student Summaries ===
-    if exists_read(summaries):
+    if os.path.exists(summaries) and os.path.getsize(summaries) > 0:
         lines.append(section("Student Profiles (Narrative Summaries)"))
-        with open(summaries, "r") as f:
+        with open(summaries, "r", encoding="utf-8") as f:
             summaries_text = f.read().split("\n\n")
         for summary in summaries_text:
             if summary.strip():
                 lines.append(f"```\n{summary}\n```")
 
     # === Data Preprocessing ===
-    if exists_read(prep_rep):
-        prep = pd.read_csv(prep_rep)
+    prep = load_df(prep_rep)
+    if prep is not None:
         lines.append(section("Data Preprocessing"))
         lines.append("Summary of missing values handled, duplicates removed, and ID normalization:")
         lines.append(prep.to_markdown(index=False))
 
+    # Report columns dropped due to being all-NaN
+    if dropped_columns:
+        lines.append("\n**Columns dropped (all-NA) during report load:**")
+        for p, cols in dropped_columns.items():
+            lines.append(f"- {os.path.basename(p)}: {', '.join(cols)}")
+
     # Data dictionary preview
-    if exists_read(dict_xlsx):
+    # Data dictionary preview: try xlsx first
+    dict_df = None
+    if os.path.exists(dict_xlsx) and os.path.getsize(dict_xlsx) > 0:
         try:
             dict_df = pd.read_excel(dict_xlsx)
-            lines.append("\n**Data Dictionary (Preview)**")
-            lines.append(dict_df.head(10).to_markdown(index=False))
-            lines.append("\n*Full data dictionary available in* `data/processed/data_dictionary.xlsx`.")
-        except Exception as e:
-            lines.append(f"Could not read data dictionary: {e}")
+        except Exception:
+            dict_df = None
+    if dict_df is not None:
+        dict_df = dict_df.dropna(axis=1, how='all').fillna("")
+        lines.append("\n**Data Dictionary (Preview)**")
+        lines.append(dict_df.head(10).to_markdown(index=False))
+        lines.append("\n*Full data dictionary available in* `data/processed/data_dictionary.xlsx`.")
 
     # Appendices
     lines.append(section("Appendix A: Statistical Notes"))

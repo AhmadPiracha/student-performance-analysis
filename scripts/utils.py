@@ -60,30 +60,144 @@ def to_datetime_safe(x, fmt="%d/%m/%Y %H:%M"):
     except Exception:
         return pd.NaT
 
-def nearest_time_merge(left, right, on_id, left_time, right_time, tolerance_seconds=5, direction="nearest"):
-    left2 = left.copy()
-    right2 = right.copy()
+def nearest_time_merge(left, right, on_id, left_time, right_time, tolerance_seconds, direction="nearest"):
+    """
+    Robust nearest-time merge implemented per-id to avoid pandas' global
+    'left keys must be sorted' requirement.
 
-    if left2.empty or right2.empty:
-        return pd.DataFrame()
+    Strategy:
+      - copy inputs and create standardized temporary id/time columns
+      - parse timestamps to UTC-naive
+      - drop rows missing id/time
+      - for each id in left, sort that id's rows and the matching right rows,
+        then run pd.merge_asof on the pair and collect results
+      - concat results and return with original columns preserved
+    """
+    left = left.copy()
+    right = right.copy()
 
-    # Sort safely
-    left2 = left2.sort_values([on_id, left_time]).reset_index(drop=True)
-    right2 = right2.sort_values([on_id, right_time]).reset_index(drop=True)
+    # Debug helper: print incoming column names
+    try:
+        print("nearest_time_merge called; on_id=", on_id)
+        print("left columns:", list(left.columns))
+        print("right columns:", list(right.columns))
+    except Exception:
+        pass
 
-    # Drop null timestamps and IDs
-    left2 = left2.dropna(subset=[on_id, left_time])
-    right2 = right2.dropna(subset=[on_id, right_time])
+    tmp_id = "__merge_id__"
+    tmp_lt = "__merge_time_l__"
+    tmp_rt = "__merge_time_r__"
 
-    out = pd.merge_asof(
-        left2, right2,
-        by=on_id,
-        left_on=left_time, right_on=right_time,
-        direction=direction,
-        tolerance=pd.Timedelta(seconds=tolerance_seconds)
-    )
+    # Allow case-insensitive id column matching; fall back to provided on_id
+    def _find_col(df, candidate):
+        if candidate in df.columns:
+            return candidate
+        # try case-insensitive
+        for c in df.columns:
+            if c.lower() == candidate.lower():
+                return c
+        return None
+
+    # locate actual id columns in each frame
+    left_id_col = _find_col(left, on_id)
+    right_id_col = _find_col(right, on_id)
+    if left_id_col is None or right_id_col is None:
+        # give full context and raise
+        raise KeyError(
+            "nearest_time_merge: id column '{}' not found in left or right DataFrame. left cols: {} right cols: {}".format(
+                on_id, list(left.columns), list(right.columns)
+            )
+        )
+
+    # Standardize IDs into temp column (preserve original on_id)
+    try:
+        left[tmp_id] = left[left_id_col].astype(str).str.upper().str.strip()
+        right[tmp_id] = right[right_id_col].astype(str).str.upper().str.strip()
+    except Exception as e:
+        raise RuntimeError(f"nearest_time_merge: failed to create standardized id column from '{left_id_col}'/'{right_id_col}': {e}\nLeft cols: {list(left.columns)}\nRight cols: {list(right.columns)}")
+
+    # Create temporary timestamp columns (parse to UTC then drop tz)
+    left[tmp_lt] = pd.to_datetime(left[left_time], errors="coerce", utc=True)
+    right[tmp_rt] = pd.to_datetime(right[right_time], errors="coerce", utc=True)
+    # Robustly remove/normalize tz info (works for tz-aware and tz-naive series)
+    try:
+        left[tmp_lt] = left[tmp_lt].dt.tz_convert("UTC").dt.tz_localize(None)
+    except Exception:
+        try:
+            left[tmp_lt] = left[tmp_lt].dt.tz_localize(None)
+        except Exception:
+            # leave as-is (may already be naive or all NaT)
+            pass
+    try:
+        right[tmp_rt] = right[tmp_rt].dt.tz_convert("UTC").dt.tz_localize(None)
+    except Exception:
+        try:
+            right[tmp_rt] = right[tmp_rt].dt.tz_localize(None)
+        except Exception:
+            pass
+
+    # Drop rows missing id or timestamps
+    left = left.dropna(subset=[tmp_id, tmp_lt])
+    right = right.dropna(subset=[tmp_id, tmp_rt])
+
+    # Prepare container for per-id merge results
+    chunks = []
+    tol = pd.Timedelta(seconds=tolerance_seconds)
+
+    # Iterate left ids (smaller cardinality expected) and merge per-group
+    left_ids = left[tmp_id].unique()
+    for uid in left_ids:
+        lgrp = left[left[tmp_id] == uid].sort_values(tmp_lt).reset_index(drop=True)
+        rgrp = right[right[tmp_id] == uid].sort_values(tmp_rt).reset_index(drop=True)
+        if rgrp.empty:
+            # no right rows for this id -> keep left rows with NaNs for right cols
+            # preserve original columns by concatenating lgrp with NaN columns from right
+            # easiest: perform merge_asof with empty right (will produce lgrp with NaNs)
+            out_grp = pd.merge_asof(
+                lgrp, rgrp,
+                left_on=tmp_lt, right_on=tmp_rt,
+                by=tmp_id,
+                tolerance=tol,
+                direction=direction
+            )
+        else:
+            out_grp = pd.merge_asof(
+                lgrp, rgrp,
+                left_on=tmp_lt, right_on=tmp_rt,
+                by=tmp_id,
+                tolerance=tol,
+                direction=direction
+            )
+        chunks.append(out_grp)
+
+    if not chunks:
+        # nothing to merge -> return empty frame with left's columns
+        empty_out = left.iloc[0:0].copy()
+        # ensure requested id column exists on empty frame
+        empty_out[on_id] = pd.Series(dtype=object)
+        for c in (tmp_id, tmp_lt, tmp_rt):
+            if c in empty_out.columns:
+                empty_out = empty_out.drop(columns=[c])
+        return empty_out
+
+    out = pd.concat(chunks, axis=0, ignore_index=True, sort=False)
+
+    # Ensure original id column name exists (populate from tmp_id)
+    try:
+        out[on_id] = out[tmp_id]
+    except Exception:
+        # fallback: if tmp_id missing, try to copy from one of the original id cols
+        if left_id_col in out.columns:
+            out[on_id] = out[left_id_col]
+        elif right_id_col in out.columns:
+            out[on_id] = out[right_id_col]
+
+    # Drop temporary helper columns
+    for c in (tmp_id, tmp_lt, tmp_rt):
+        if c in out.columns:
+            out = out.drop(columns=[c])
+
     return out
-
 
 def paired_confidence_interval(a, b, alpha=0.05):
     """
@@ -92,12 +206,14 @@ def paired_confidence_interval(a, b, alpha=0.05):
     """
     diff = np.array(a) - np.array(b)
     diff = diff[~np.isnan(diff)]
-    if len(diff) < 2:
+    n = len(diff)
+    if n < 2:
         return (np.nan, np.nan)
 
     mean_diff = diff.mean()
-    se = stats.sem(diff, nan_policy="omit")
-    h = se * stats.t.ppf(1 - alpha/2, len(diff)-1)
+    # compute standard error manually to avoid scipy nan_policy differences
+    se = np.std(diff, ddof=1) / np.sqrt(n)
+    h = se * stats.t.ppf(1 - alpha/2, n - 1)
     return (mean_diff - h, mean_diff + h)
 
 

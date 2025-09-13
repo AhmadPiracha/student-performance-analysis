@@ -8,37 +8,38 @@ This project performs an integrated analysis of **Games/Performance**, **Emotion
 
 1. **Create a virtual environment** (recommended):
 
-```bash
+```fish
 python -m venv ef_env
 ```
 
-2. **Activate the environment**:
+2. **Activate the environment** (fish shell example):
 
-* **Windows**:
-
-```bash
-ef_env\Scripts\activate
+```fish
+source ef_env/bin/activate.fish
 ```
 
-* **Linux / macOS**:
+For POSIX shells (bash/zsh):
 
 ```bash
 source ef_env/bin/activate
 ```
 
-3. **Install required packages**:
+3. **Install required packages** (use pinned `requirements.txt`):
 
-```bash
+```fish
 pip install -r requirements.txt
 ```
 
-> `requirements.txt` includes all dependencies like `pandas`, `numpy`, `matplotlib`, `pyyaml`, `scipy`, `openpyxl`, `pypandoc`, etc.
-> ⚠️ **Pandoc Note**: You do **not** need to manually install pandoc. The pipeline automatically downloads pandoc if it’s not available on your system.
+> `requirements.txt` contains pinned versions for reproducibility. If you need PDF generation via LaTeX, also install system TeX packages (see below).
 
-4. **Run the pipeline inside the environment**:
+4. **Run the pipeline inside the environment** (optionally set a seed):
 
-```bash
+```fish
+# without seed
 python -m scripts.run_all --config config.yaml
+
+# with deterministic seed (recommended for reproducible runs)
+python -m scripts.run_all --config config.yaml --seed 42
 ```
 
 5. **Deactivate the environment** when done:
@@ -126,14 +127,34 @@ python -m scripts.run_all --config config.yaml
 ## Notes
 
 * The pipeline is **config-driven**; update `config.yaml` rather than editing code.
-* Visualizations use **matplotlib** only (no seaborn) and avoid specifying colors.
+* Visualizations use **matplotlib** (and optional seaborn) and avoid specifying colors.
 * Accuracy in percent is automatically normalized to 0–1.
 * Timestamp-based merges use a tolerance window (`time_tolerance_seconds` in config).
-* Pandoc is auto-downloaded if not found, so PDF generation works out of the box.
+
+PDF generation notes
+* The exporter uses `pypandoc` and attempts several LaTeX engines. If a TeX engine is not available the exporter will write an HTML fallback (`outputs/reports/EF_Report.html`).
+* To produce a PDF locally, install a TeX engine. On Debian/Ubuntu:
+
+```fish
+sudo apt update
+sudo apt install -y texlive-latex-recommended texlive-luatex
+```
+
+* Alternatively install `wkhtmltopdf` to convert HTML to PDF:
+
+```fish
+sudo apt update
+sudo apt install -y wkhtmltopdf
+```
+
+Reproducibility checklist
+* Use the pinned `requirements.txt`.
+* Run with `--seed` to stabilize random operations (numpy/random/hash seeding).
+* Keep `id_mapping_secure.csv` private — it maps UUIDs to Student labels.
 
 ---
 
-## ✅ Client Checklist Coverage
+## ✅ Checklist Coverage
 
 This section maps the client’s requirements to deliverables produced by the pipeline:
 

@@ -1,6 +1,9 @@
 import argparse
 import yaml
 import warnings
+import os
+import random
+import numpy as np
 from scripts.preprocess import run as run_pre
 from scripts.performance import run as run_perf
 from scripts.emotion import run as run_emo
@@ -13,7 +16,18 @@ from scripts.report import run as run_report
 warnings.filterwarnings("ignore")  # suppress pandas / matplotlib warnings
 
 
-def main(config_path):
+def main(config_path, seed=None):
+    # Set global seed for reproducibility
+    if seed is not None:
+        try:
+            seed = int(seed)
+        except Exception:
+            seed = None
+    if seed is not None:
+        os.environ['PYTHONHASHSEED'] = str(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        print(f"Global random seed set to: {seed}")
     print(f"Loading config: {config_path}")
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
@@ -93,5 +107,6 @@ def main(config_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to config.yaml")
+    parser.add_argument("--seed", required=False, help="Optional integer seed for reproducibility")
     args = parser.parse_args()
-    main(args.config)
+    main(args.config, seed=args.seed)

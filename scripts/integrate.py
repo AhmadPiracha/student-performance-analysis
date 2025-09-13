@@ -125,6 +125,12 @@ def run(config_path):
         early_flags = df.groupby(id_col)[["risk_score", "needs_review"]].max().reset_index()
         early_flags = make_timestamps_naive(early_flags)
         early_flags.to_excel(proc / "early_indicators_report.xlsx", index=False, engine='openpyxl')
+        # Also write CSV so downstream report readers find early_indicators_report.csv
+        try:
+            early_flags.to_csv(proc / "early_indicators_report.csv", index=False)
+        except Exception as e:
+            # Non-fatal; warn and continue
+            print(f"Warning: failed to write early_indicators_report.csv: {e}")
     else:
         df["risk_score"] = np.nan
         df["needs_review"] = False
@@ -173,10 +179,11 @@ def run(config_path):
             pd.DataFrame(results).to_excel(proc / out_file, index=False, engine='openpyxl')
 
     return {
-        "integrated_table": str(integrated_file),
-        "student_profiles": str(proc / "student_profiles.xlsx"),
-        "early_indicators": str(proc / "early_indicators_report.xlsx"),
-        "summaries": str(proc / "student_summaries.txt"),
+    "integrated_table": str(integrated_file),
+    "student_profiles": str(proc / "student_profiles.xlsx"),
+    "early_indicators": str(proc / "early_indicators_report.xlsx"),
+    "early_indicators_csv": str(proc / "early_indicators_report.csv"),
+    "summaries": str(proc / "student_summaries.txt"),
         "emotion_stats": str(proc / "emotion_perf_corr.xlsx") if not emo.empty else None,
         "body_stats": str(proc / "body_perf_corr.xlsx") if not body.empty else None
     }
